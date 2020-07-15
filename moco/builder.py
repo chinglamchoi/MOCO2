@@ -73,10 +73,10 @@ class MoCo(nn.Module):
         """
         # gather from all gpus
         #print(x.shape) # [32, 3, 216, 216]
-        print(torch.distributed.get_world_size())
+        #print(torch.get_world_size())
         batch_size_this = x.shape[0]
         print("s1")
-        x_gather = concat_all_gather(x)
+        x_gather = x##concat_all_gather(x)
         print("s2")
         #print(x_gather.shape) # [32, 3, 216, 216]
         batch_size_all = x_gather.shape[0]
@@ -106,7 +106,7 @@ class MoCo(nn.Module):
         """
         # gather from all gpus
         batch_size_this = x[0].shape[0]
-        x_gather = concat_all_gather(x)
+        x_gather = x##concat_all_gather(x)
         batch_size_all = x_gather.shape[0]
 
         num_gpus = batch_size_all // batch_size_this
@@ -182,15 +182,15 @@ class MoCo(nn.Module):
 
 
 # utils
-@torch.no_grad()
-def concat_all_gather(tensor):
+##@torch.no_grad()
+##def concat_all_gather(tensor):
     """
     Performs all_gather operation on the provided tensors.
     *** Warning ***: torch.distributed.all_gather has no gradient.
     """
-    tensors_gather = [torch.ones_like(tensor)
-        for _ in range(torch.distributed.get_world_size())]
-    torch.distributed.all_gather(tensors_gather, tensor, async_op=False)
-
-    output = torch.cat(tensors_gather, dim=0)
-    return output
+    ##tensors_gather = torch.ones_like(tensor)
+    #for _ in range(torch.distributed.get_world_size())]
+    #torch.distributed.all_gather(tensors_gather, tensor, async_op=False)
+    ##torch.gather(tensors_gather, tensor, async_op=False)
+    ##output = torch.cat(tensors_gather, dim=0)
+    ##return output
