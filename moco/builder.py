@@ -2,7 +2,12 @@
 import torch
 import torch.nn as nn
 
+#def f():
+#    global gpu_idx
+#    gpu_idx += 1
+#    gpu_idx = 0 if gpu_idx == 8 else gpu_idx
 
+#gpu_idx = 0
 class MoCo(nn.Module):
     """
     Build a MoCo model with: a query encoder, a key encoder, and a queue
@@ -67,6 +72,7 @@ class MoCo(nn.Module):
 
     @torch.no_grad()
     def _batch_shuffle_ddp(self, x):
+        #global gpu_idx
         """
         Batch shuffle, for making use of BatchNorm.
         *** Only support DistributedDataParallel (DDP) model. ***
@@ -81,25 +87,28 @@ class MoCo(nn.Module):
         #print(x_gather.shape) # [32, 3, 216, 216]
         batch_size_all = x_gather.shape[0]
         print("s3")
-        num_gpus = batch_size_all // batch_size_this
-        print(num_gpus)
+        num_gpus = 8#batch_size_all // batch_size_this
         # random shuffle index
         idx_shuffle = torch.randperm(batch_size_all).cuda()
 
         # broadcast to all gpus
-        torch.distributed.broadcast(idx_shuffle, src=0)
+        torch.cuda.comm.broadcast(idx_shuffle, [0,1,2,3,4,5,6,7])
 
         # index for restoring
         idx_unshuffle = torch.argsort(idx_shuffle)
 
         # shuffled index for this gpu
-        gpu_idx = torch.distributed.get_rank()
+        print("try0")
+        gpu_idx = torch.distributed.get_rank()#torch.cuda.current_device() #torch.distributed.get_rank()
+        print("current device", gpu_idx)
         idx_this = idx_shuffle.view(num_gpus, -1)[gpu_idx]
-
+        print("try2")
+        #f()
         return x_gather[idx_this], idx_unshuffle
 
     @torch.no_grad()
     def _batch_unshuffle_ddp(self, x, idx_unshuffle):
+        #global gpu_idx
         """
         Undo batch shuffle.
         *** Only support DistributedDataParallel (DDP) model. ***
@@ -109,14 +118,13 @@ class MoCo(nn.Module):
         x_gather = x##concat_all_gather(x)
         batch_size_all = x_gather.shape[0]
 
-        num_gpus = batch_size_all // batch_size_this
+        num_gpus = 8#batch_size_all // batch_size_this
 
         # restored index for this gpu
-        gpu_idx = torch.distributed.get_rank()
-        gpu_idx += 1
-        print(gpu_idx)
+        gpu_idx = torch.distributed.get_rank()#torch.cuda.current_device()#torch.distributed.get_rank()
+        print("current device", gpu_idx)
         idx_this = idx_unshuffle.view(num_gpus, -1)[gpu_idx]
-
+        #f()
         return x_gather[idx_this]
 
     def forward(self, ima_q, ima_k, imb_q, imb_k):

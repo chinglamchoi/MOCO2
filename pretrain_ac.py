@@ -561,15 +561,13 @@ def main():
   device = torch.device("cuda:0")
   model = torch.nn.parallel.DataParallel(model, device_ids=args.gpu)
   model.to(device)
-  for i in range(8):
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(i)
-    dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=2, rank=i)
-    ngpus_per_node=1
-    args.batch_size = int(args.batch_size / ngpus_per_node)
-    criterion = nn.CrossEntropyLoss().cuda(i)
-    optimizer = torch.optim.SGD(model.parameters(), args.lr,
-              momentum=args.momentum,
-              weight_decay=args.weight_decay)
+  dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=1, rank=0)
+  ngpus_per_node=1
+  args.batch_size = int(args.batch_size / ngpus_per_node)
+  criterion = nn.CrossEntropyLoss().cuda()
+  optimizer = torch.optim.SGD(model.parameters(), args.lr,
+        momentum=args.momentum,
+        weight_decay=args.weight_decay)
   #if args.resume:
     #if os.path.isfile(args.resume):
       #print("=> loading checkpoint '{}'".format(args.resume))
@@ -587,31 +585,31 @@ def main():
   #cudnn.benchmark = True
 
   # Data loading code
-    train_dataset = dataset.dataset_unpair(args)
+  train_dataset = dataset.dataset_unpair(args)
   #if args.distributed:
-    #train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+  train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
   #else:
-    train_sampler = None
-    train_loader = torch.utils.data.DataLoader(
-      train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-      num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
+  #train_sampler = None
+  train_loader = torch.utils.data.DataLoader(
+    train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
+    num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
 
-    for epoch in range(args.start_epoch, args.epochs):
+  for epoch in range(args.start_epoch, args.epochs):
     #if args.distributed:
       #train_sampler.set_epoch(epoch)
-      adjust_learning_rate(optimizer, epoch, args)
+    adjust_learning_rate(optimizer, epoch, args)
 
-      train(i, train_loader, model, criterion, optimizer, epoch, args)
+    train(0, train_loader, model, criterion, optimizer, epoch, args)
 
-      if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-        and args.rank % ngpus_per_node == 0):
-        save_checkpoint(epoch, {
-          'epoch': epoch + 1,
-          #'arch': args.arch,
-          'state_dict': model.state_dict(),
-          'optimizer' : optimizer.state_dict(),
-        }, is_best=True, filename='checkpoint.pt')
-  os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3,4,5,6,7"
+    if not args.multiprocessing_distributed or (args.multiprocessing_distributed
+      and args.rank % ngpus_per_node == 0):
+      save_checkpoint(epoch, {
+      'epoch': epoch + 1,
+      #'arch': args.arch,
+      'state_dict': model.state_dict(),
+      'optimizer' : optimizer.state_dict(),
+    }, is_best=True, filename='checkpoint.pt')
+
 def train(gpu, train_loader, model, criterion, optimizer, epoch, args):
   print("training")
   #batch_time = AverageMeter('Time', ':6.3f')
