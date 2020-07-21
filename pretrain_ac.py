@@ -36,7 +36,7 @@ parser.add_argument('--epochs', default=200, type=int, metavar='N',
                             help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                             help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=256, type=int, metavar='N',
+parser.add_argument('-b', '--batch-size', default=64, type=int, metavar='N',
                             help='total batch size of all GPUs on current node when '
                                  'using Data Parallel or Distributed Data Parallel')
 parser.add_argument('--lr', '--learning-rate', default=0.03, type=float,
@@ -69,7 +69,7 @@ parser.add_argument('--multiprocessing-distributed', default=True, action='store
                                  'N processes per node, which has N GPUs. This is the '
                                  'fastest way to use PyTorch for either single node or '
                                  'multi node data parallel training')
-parser.add_argument('--moco-dim', default=128, type=int,
+parser.add_argument('--moco-dim', default=8, type=int,
                             help='feature dimension (default: 128)')
 parser.add_argument('--moco-k', default=65536, type=int,
                             help='queue size; number of negative keys (default: 65536)')
@@ -90,9 +90,11 @@ parser.add_argument('--resize_size', type=int, default=256, help='resized image 
 parser.add_argument('--crop_size', type=int, default=216, help='cropped image size for training')
 parser.add_argument('--input_dim_a', type=int, default=3, help='# of input channels for domain A')
 parser.add_argument('--input_dim_b', type=int, default=3, help='# of input channels for domain B')
-parser.add_argument("--mm", type=str, default="c", help="train content or attribute encoder")
+parser.add_argument("--mm", type=str, default="a", help="train content or attribute encoder")
 parser.add_argument("--no_flip", action="store_true", help="specified if no flipping")
 
+#os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+print("Using", torch.cuda.device_count(), "devices")
 ####################################################################
 #---------------------------- Encoders -----------------------------
 ####################################################################
@@ -548,22 +550,19 @@ def remove_spectral_norm(module, name='weight'):
 
 
 def main():
+  least_loss = 1e10
   args = parser.parse_args()
-  processes = []
   args.gpu = [0,1,2,3,4,5,6,7]
   if args.mm == "c":
     m = E_content(args.input_dim_a, args.input_dim_b)
   else:
-    m = E_attr()
+    m = E_attr(args.input_dim_a, args.input_dim_b)
   model = moco.builder.MoCo(
     m,
     args.moco_dim, args.moco_k, args.moco_m, args.moco_t, args.mlp)
   device = torch.device("cuda:0")
   model = torch.nn.parallel.DataParallel(model, device_ids=args.gpu)
   model.to(device)
-  dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=1, rank=0)
-  ngpus_per_node=1
-  args.batch_size = int(args.batch_size / ngpus_per_node)
   criterion = nn.CrossEntropyLoss().cuda()
   optimizer = torch.optim.SGD(model.parameters(), args.lr,
         momentum=args.momentum,
@@ -586,10 +585,7 @@ def main():
 
   # Data loading code
   train_dataset = dataset.dataset_unpair(args)
-  #if args.distributed:
-  train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-  #else:
-  #train_sampler = None
+  train_sampler = None#train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
   train_loader = torch.utils.data.DataLoader(
     train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
     num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
@@ -599,22 +595,23 @@ def main():
       #train_sampler.set_epoch(epoch)
     adjust_learning_rate(optimizer, epoch, args)
 
-    train(0, train_loader, model, criterion, optimizer, epoch, args)
-
+    epoch_loss = train(0, train_loader, model, criterion, optimizer, epoch, args)
+    print("Loss at epoch", epoch, "|", epoch_loss)
+    bested = True if epoch_loss < least_loss else False
     if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-      and args.rank % ngpus_per_node == 0):
+      and args.rank % 1 == 0):
       save_checkpoint(epoch, {
       'epoch': epoch + 1,
       #'arch': args.arch,
       'state_dict': model.state_dict(),
       'optimizer' : optimizer.state_dict(),
-    }, is_best=True, filename='checkpoint.pt')
+    }, is_best=bested, filename='checkpoint.pt')
 
 def train(gpu, train_loader, model, criterion, optimizer, epoch, args):
   print("training")
   #batch_time = AverageMeter('Time', ':6.3f')
   #data_time = AverageMeter('Data', ':6.3f')
-  #losses = AverageMeter('Loss', ':.4e')
+  losses = AverageMeter('Loss', ':.4e')
   top1 = AverageMeter('Acc@1', ':6.2f')
   top5 = AverageMeter('Acc@5', ':6.2f')
   #progress = ProgressMeter(
@@ -623,6 +620,7 @@ def train(gpu, train_loader, model, criterion, optimizer, epoch, args):
     #prefix="Epoch: [{}]".format(epoch))
 
   model.train()
+  cnt, epoch_loss = 1, 0
   #end = time.time()
   for i, (images_A, images_B) in enumerate(train_loader):
     # measure data loading time
@@ -633,20 +631,23 @@ def train(gpu, train_loader, model, criterion, optimizer, epoch, args):
         images_B[0] = images_B[0].cuda(gpu, non_blocking=True)
         images_B[1] = images_B[1].cuda(gpu, non_blocking=True)
     # compute output
-    output, target = model(ima_q=images_A[0], ima_k=images_A[1], imb_q=images_B[0], imb_k=images_B[1])
-    print("one")
-    loss = criterion(output, target)
-    print("two")
-    acc1, acc5 = accuracy(output, target, topk=(1, 5))
-    print("three")
+    output1, output2, target1, target2 = model(ima_q=images_A[0], ima_k=images_A[1], imb_q=images_B[0], imb_k=images_B[1])
+    loss = criterion(output1, target1)
+    loss.requires_grad = True
+    loss = loss + criterion(output2, target2)
+    loss = loss/2
+    acc1_a, acc5_a = accuracy(output1, target1, topk=(1, 5))
+    acc1_b, acc5_b = accuracy(output2, target2, topk=(1, 5))
     losses.update(loss.item(), images_A[0].size(0)) #ALERT!!
+    acc1, acc5 = (acc1_a + acc1_b)/2, (acc5_a + acc5_b)/2
     top1.update(acc1[0], images_A[0].size(0))
     top5.update(acc5[0], images_A[0].size(0))
-    print("four")
     optimizer.zero_grad()
-    print(loss.item())
     loss.backward()
     optimizer.step()
+    cnt += 1
+    epoch_loss += loss.item()
+  return epoch_loss/cnt
 
     # measure elapsed time
     #batch_time.update(time.time() - end)

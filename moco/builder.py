@@ -13,7 +13,7 @@ class MoCo(nn.Module):
     Build a MoCo model with: a query encoder, a key encoder, and a queue
     https://arxiv.org/abs/1911.05722
     """
-    def __init__(self, base_encoder, dim=128, K=65536, m=0.999, T=0.07, mlp=False):
+    def __init__(self, base_encoder, dim=8, K=65536, m=0.999, T=0.07, mlp=False):
         """
         dim: feature dimension (default: 128)
         K: queue size; number of negative keys (default: 65536)
@@ -41,7 +41,7 @@ class MoCo(nn.Module):
             param_k.requires_grad = False  # not update by gradient
 
         # create the queue
-        self.register_buffer("queue", torch.randn(dim, K))
+        self.register_buffer("queue", torch.randn(2, dim, K))
         self.queue = nn.functional.normalize(self.queue, dim=0)
 
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
@@ -55,77 +55,20 @@ class MoCo(nn.Module):
             param_k.data = param_k.data * self.m + param_q.data * (1. - self.m)
 
     @torch.no_grad()
-    def _dequeue_and_enqueue(self, keys):
+    def _dequeue_and_enqueue(self, key1, key2):
         # gather keys before updating queue
-        keys = concat_all_gather(keys)
+        #keys = keys#concat_all_gather(keys)
 
-        batch_size = keys.shape[0]
+        batch_size = key1.shape[0]
 
         ptr = int(self.queue_ptr)
         assert self.K % batch_size == 0  # for simplicity
 
         # replace the keys at ptr (dequeue and enqueue)
-        self.queue[:, ptr:ptr + batch_size] = keys.T
+        self.queue[0, :, ptr:ptr + batch_size] = key1.transpose(0,1)
+        self.queue[1, :, ptr:ptr + batch_size] = key2.transpose(0,1)
         ptr = (ptr + batch_size) % self.K  # move pointer
-
         self.queue_ptr[0] = ptr
-
-    @torch.no_grad()
-    def _batch_shuffle_ddp(self, x):
-        #global gpu_idx
-        """
-        Batch shuffle, for making use of BatchNorm.
-        *** Only support DistributedDataParallel (DDP) model. ***
-        """
-        # gather from all gpus
-        #print(x.shape) # [32, 3, 216, 216]
-        #print(torch.get_world_size())
-        batch_size_this = x.shape[0]
-        print("s1")
-        x_gather = x##concat_all_gather(x)
-        print("s2")
-        #print(x_gather.shape) # [32, 3, 216, 216]
-        batch_size_all = x_gather.shape[0]
-        print("s3")
-        num_gpus = 8#batch_size_all // batch_size_this
-        # random shuffle index
-        idx_shuffle = torch.randperm(batch_size_all).cuda()
-
-        # broadcast to all gpus
-        torch.cuda.comm.broadcast(idx_shuffle, [0,1,2,3,4,5,6,7])
-
-        # index for restoring
-        idx_unshuffle = torch.argsort(idx_shuffle)
-
-        # shuffled index for this gpu
-        print("try0")
-        gpu_idx = torch.distributed.get_rank()#torch.cuda.current_device() #torch.distributed.get_rank()
-        print("current device", gpu_idx)
-        idx_this = idx_shuffle.view(num_gpus, -1)[gpu_idx]
-        print("try2")
-        #f()
-        return x_gather[idx_this], idx_unshuffle
-
-    @torch.no_grad()
-    def _batch_unshuffle_ddp(self, x, idx_unshuffle):
-        #global gpu_idx
-        """
-        Undo batch shuffle.
-        *** Only support DistributedDataParallel (DDP) model. ***
-        """
-        # gather from all gpus
-        batch_size_this = x[0].shape[0]
-        x_gather = x##concat_all_gather(x)
-        batch_size_all = x_gather.shape[0]
-
-        num_gpus = 8#batch_size_all // batch_size_this
-
-        # restored index for this gpu
-        gpu_idx = torch.distributed.get_rank()#torch.cuda.current_device()#torch.distributed.get_rank()
-        print("current device", gpu_idx)
-        idx_this = idx_unshuffle.view(num_gpus, -1)[gpu_idx]
-        #f()
-        return x_gather[idx_this]
 
     def forward(self, ima_q, ima_k, imb_q, imb_k):
         """
@@ -137,68 +80,48 @@ class MoCo(nn.Module):
         """
 
         # compute query features
-        q = self.encoder_q(ima_q, imb_q)  # queries: NxC
-        print("f1")
-        qq = torch.stack((q[0], q[1]))
-        print("f2")
-        q = nn.functional.normalize(qq, dim=1)
-        print("f3")
+        q1, q2 = self.encoder_q(ima_q, imb_q)  # queries: NxC
+        #qq = torch.stack((q[0], q[1]))
+        q1 = nn.functional.normalize(q1, dim=1)
+        q2 = nn.functional.normalize(q2, dim=1)
 
         # compute key features
         with torch.no_grad():  # no gradient to keys
             self._momentum_update_key_encoder()  # update the key encoder
-            print("f4")
             # shuffle for making use of BN
-            ima_k, idx_unshuffle1 = self._batch_shuffle_ddp(ima_k)
-            print("f5")
-            imb_k, idx_unshuffle2 = self._batch_shuffle_ddp(imb_k)
-            print("f6")
             k1, k2 = self.encoder_k(ima_k, imb_k)  # keys: NxC
-            print("f7")
             k1 = nn.functional.normalize(k1, dim=1)
-            print("f8")
             k2 = nn.functional.normalize(k2, dim=1)
-            print("f9")
-            # undo shuffle
-            k1 = self._batch_unshuffle_ddp(k1, idx_unshuffle1) #ALERT!!
-            print("f10")
-            k2 = self._batch_unshuffle_ddp(k2, idx_unshuffle2)
-            print("f11")
-            k = torch.stack((k1, k2))
-            print("f12")
         # compute logits
         # Einstein sum is more intuitive
         # positive logits: Nx1
-        l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
-        print("f13")
+        l_pos1 = torch.einsum('nc,nc->n', [q1, k1]).unsqueeze(-1)
+        l_pos2 = torch.einsum('nc,nc->n', [q2, k2]).unsqueeze(-1)
         # negative logits: NxK
-        l_neg = torch.einsum('nc,ck->nk', [q, self.queue.clone().detach()])
-        print("f14")
+        l_neg1 = torch.einsum('nc,ck->nk', [q1, self.queue[0].clone().detach()])
+        l_neg2 = torch.einsum('nc,ck->nk', [q2, self.queue[1].clone().detach()])
         # logits: Nx(1+K)
-        logits = torch.cat([l_pos, l_neg], dim=1)
-        print("f15")
+        logits1 = torch.cat([l_pos1, l_neg1], dim=1)
+        logits2 = torch.cat([l_pos2, l_neg2], dim=1)
         # apply temperature
-        logits /= self.T
-        print("f16")
+        logits1 /= self.T
+        logits2 /= self.T
         # labels: positive key indicators
-        labels = torch.zeros(logits.shape[0], dtype=torch.long).cuda()
-        print("f17")
+        labels1 = torch.zeros(logits1.shape[0], dtype=torch.long).cuda()
+        labels2 = torch.zeros(logits2.shape[0], dtype=torch.long).cuda()
         # dequeue and enqueue
-        self._dequeue_and_enqueue(k)
-        print("f18")
-        return logits, labels
+        self._dequeue_and_enqueue(k1, k2)
+        return logits1, logits2, labels1, labels2
 
-
+"""
 # utils
-##@torch.no_grad()
-##def concat_all_gather(tensor):
-    """
+@torch.no_grad()
+def concat_all_gather(tensor):
     Performs all_gather operation on the provided tensors.
     *** Warning ***: torch.distributed.all_gather has no gradient.
-    """
-    ##tensors_gather = torch.ones_like(tensor)
-    #for _ in range(torch.distributed.get_world_size())]
-    #torch.distributed.all_gather(tensors_gather, tensor, async_op=False)
-    ##torch.gather(tensors_gather, tensor, async_op=False)
-    ##output = torch.cat(tensors_gather, dim=0)
-    ##return output
+    tensors_gather = [torch.ones_like(tensor)
+                    for _ in range(torch.distributed.get_world_size())]
+    torch.distributed.all_gather(tensors_gather, tensor, async_op=False)
+    output = torch.cat(tensors_gather, dim=0)
+    return output
+"""
