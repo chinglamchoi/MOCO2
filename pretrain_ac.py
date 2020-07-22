@@ -32,7 +32,7 @@ parser.add_argument('--dataroot', type=str, default="data/cat2dog", metavar='DIR
 # architecture
 parser.add_argument('-j', '--workers', default=32, type=int, metavar='N',
                             help='number of data loading workers (default: 32)')
-parser.add_argument('--epochs', default=200, type=int, metavar='N',
+parser.add_argument('--epochs', default=600, type=int, metavar='N',
                             help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                             help='manual epoch number (useful on restarts)')
@@ -40,17 +40,17 @@ parser.add_argument('-b', '--batch-size', default=64, type=int, metavar='N',
                             help='total batch size of all GPUs on current node when '
                                  'using Data Parallel or Distributed Data Parallel')
 parser.add_argument('--lr', '--learning-rate', default=0.03, type=float,
-                            metavar='LR', help='initial learning rate', dest='lr')
+                            metavar='LR', help='initial learning rate', dest='lr') #0.03
 parser.add_argument('--schedule', default=[120, 160], nargs='*', type=int,
                             help='learning rate schedule (when to drop lr by 10x)')
-parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
+parser.add_argument('--momentum', default=1.9, type=float, metavar='M',
                             help='momentum of SGD solver')
 parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
                             metavar='W', help='weight decay (default: 1e-4)',
                                                 dest='weight_decay')
 parser.add_argument('-p', '--print-freq', default=10, type=int,
                             metavar='N', help='print frequency (default: 10)')
-parser.add_argument('--resume', default='', type=str, metavar='PATH',
+parser.add_argument('--resume', default='models/checkpoint.pt', type=str, metavar='PATH',
                             help='path to latest checkpoint (default: none)')
 parser.add_argument('--world-size', default=1, type=int,
                             help='number of nodes for distributed training')
@@ -567,17 +567,20 @@ def main():
   optimizer = torch.optim.SGD(model.parameters(), args.lr,
         momentum=args.momentum,
         weight_decay=args.weight_decay)
-  #if args.resume:
+  if args.resume is not None:
+    print("resuming")
     #if os.path.isfile(args.resume):
       #print("=> loading checkpoint '{}'".format(args.resume))
       #if args.gpu is None:
-        #checkpoint = torch.load(args.resume)
+    checkpoint = torch.load(args.resume)
       #else:
         #loc = 'cuda:{}'.format(args.gpu)
         #checkpoint = torch.load(args.resume, map_location=loc)
-      #args.start_epoch = checkpoint['epoch']
-      #model.load_state_dict(checkpoint['state_dict'])
-      #optimizer.load_state_dict(checkpoint['optimizer'])
+    args.start_epoch = checkpoint['epoch']
+    model.load_state_dict(checkpoint['state_dict'])
+    #optimizer.load_state_dict(checkpoint['optimizer'])
+    least_loss = checkpoint["loss"]
+    print(least_loss)
       #print("=> loaded checkpoint '{}' (epoch {})".format(args.resume, checkpoint['epoch']))
     #else:
       #print("=> no checkpoint found at '{}'".format(args.resume))
@@ -590,7 +593,7 @@ def main():
     train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
     num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
 
-  for epoch in range(args.start_epoch, args.epochs):
+  for epoch in range(args.start_epoch, args.start_epoch+args.epochs):
     #if args.distributed:
       #train_sampler.set_epoch(epoch)
     adjust_learning_rate(optimizer, epoch, args)
@@ -598,6 +601,7 @@ def main():
     epoch_loss = train(0, train_loader, model, criterion, optimizer, epoch, args)
     print("Loss at epoch", epoch, "|", epoch_loss)
     bested = True if epoch_loss < least_loss else False
+    least_loss = epoch_loss if bested else least_loss 
     if not args.multiprocessing_distributed or (args.multiprocessing_distributed
       and args.rank % 1 == 0):
       save_checkpoint(epoch, {
@@ -605,7 +609,8 @@ def main():
       #'arch': args.arch,
       'state_dict': model.state_dict(),
       'optimizer' : optimizer.state_dict(),
-    }, is_best=bested, filename='checkpoint.pt')
+      "loss" : least_loss,
+    }, is_best=bested, filename='models/checkpoint_sgd.pt')
 
 def train(gpu, train_loader, model, criterion, optimizer, epoch, args):
   print("training")
@@ -639,7 +644,7 @@ def train(gpu, train_loader, model, criterion, optimizer, epoch, args):
     acc1_a, acc5_a = accuracy(output1, target1, topk=(1, 5))
     acc1_b, acc5_b = accuracy(output2, target2, topk=(1, 5))
     losses.update(loss.item(), images_A[0].size(0)) #ALERT!!
-    acc1, acc5 = (acc1_a + acc1_b)/2, (acc5_a + acc5_b)/2
+    acc1, acc5 = (acc1_a +acc1_b)/2, (acc5_a + acc5_b)/2
     top1.update(acc1[0], images_A[0].size(0))
     top5.update(acc5[0], images_A[0].size(0))
     optimizer.zero_grad()
@@ -656,7 +661,7 @@ def train(gpu, train_loader, model, criterion, optimizer, epoch, args):
     #if i % args.print_freq == 0:
       #progress.display(i)
 
-def save_checkpoint(epoch, state, is_best, filename="checkpoint.pt"):
+def save_checkpoint(epoch, state, is_best, filename="models/checkpoint_sgd.pt"):
   if is_best:
     torch.save(state, filename)
     print("Best at epoch:", epoch)
